@@ -1,6 +1,7 @@
 import requests
 import config
 from PIL import Image
+from PIL import ImageOps
 from io import BytesIO
 import os
 import random
@@ -8,7 +9,7 @@ import time
 import numpy as np
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-import argparse
+
 
 # Record the start time
 start_time = time.time()
@@ -20,10 +21,10 @@ except FileNotFoundError:
     processed_ids = set()
 
 # Define the number of images to download
-num_images = 4000
+num_images = 15
 
 # Define the output folder
-output_folder = "scraping/CIL/output/raw"
+output_folder = "output/cinema"
 
 # Base URL for the API
 api_url = "https://cilia.crbs.ucsd.edu/rest"
@@ -115,39 +116,24 @@ def calculate_entropy(image):
 
 
 # Process the image using Floyd-Steinberg error diffusion
-def process_image(image, output_size=(1200, 1200)):
+def process_image(image):
     
     # Check the input image resolution
-    min_resolution = 300  # Set minimum resolution. API should provide 512 max thumbnail
+    min_resolution = 144  # Set minimum resolution
     width, height = image.size
     if width < min_resolution or height < min_resolution:
         return None
     
     # Resize the image (pre-dither) while maintaining aspect ratio
-    size = (2048, 2048)  # Set your desired size here
-    image.thumbnail(size, Image.BILINEAR)
+    # Avoid forcing a fixed size here
+    image.thumbnail((1920, 1920), Image.BILINEAR)  # Ensure a max size while preserving aspect ratio
     
-    # Crop the image to desired aspect ratio
-    width, height = image.size
-    new_size = min(width, height)
-
-    left = (width - new_size)/2
-    top = (height - new_size)/2
-    right = (width + new_size)/2
-    bottom = (height + new_size)/2
-
-    # Calculate and print the aspect ratio
-    aspect_ratio = new_size / new_size  # e.g. square is 1.0
-
-    image = image.crop((left, top, right, bottom))
-    print(f"cropping to aspect ratio {aspect_ratio}")
-
     # Convert the image to grayscale
     image = image.convert('L')
 
     # Dither the image
     image = image.convert('1')
-    print("dithering...")
+    print("Dithering...")
 
     # Convert the image back to RGB
     image = image.convert('RGB')
@@ -162,7 +148,7 @@ def process_image(image, output_size=(1200, 1200)):
     data[white_areas] = [255, 255, 255, 0]
     image = Image.fromarray(data)
 
-    # Crop the outer 2%
+    # Optionally crop the outer 2% (you can remove this if not needed)
     width, height = image.size
     left = width * 0.02
     top = height * 0.02
@@ -170,12 +156,21 @@ def process_image(image, output_size=(1200, 1200)):
     bottom = height * 0.98
     image = image.crop((left, top, right, bottom))
 
-    # Resize the image (post-dither) using nearest neighbor
-    image = image.resize(output_size, Image.NEAREST)
-    print("rescaling...")
+    # Dynamically calculate the final output size while preserving aspect ratio
+    final_width = width
+    final_height = height
+
+    # Resize dynamically if needed, remove hardcoded size
+    max_width = 1920  # Limit to a maximum width
+    if final_width > max_width:
+        final_height = int((max_width / final_width) * final_height)
+        final_width = max_width
+
+    # Resize the image using the dynamically calculated size
+    image = image.resize((final_width, final_height), Image.NEAREST)
+    print(f"Rescaling to {final_width}x{final_height}...")
 
     return image
-
 # Configure retries
 retry_strategy = Retry(
     total=5,
@@ -188,7 +183,33 @@ http = requests.Session()
 http.mount("https://", adapter)
 http.mount("http://", adapter)
 
-def download_and_maybe_process_image(image_id, process=True):
+
+# Function to crop image to a specific aspect ratio
+def crop_to_aspect_ratio(image, target_ratio):
+    width, height = image.size
+    current_ratio = width / height
+
+    if current_ratio > target_ratio:
+        # The image is too wide, crop the width
+        new_width = int(height * target_ratio)
+        left = (width - new_width) // 2
+        right = left + new_width
+        cropped_image = image.crop((left, 0, right, height))
+    elif current_ratio < target_ratio:
+        # The image is too tall, crop the height
+        new_height = int(width / target_ratio)
+        top = (height - new_height) // 2
+        bottom = top + new_height
+        cropped_image = image.crop((0, top, width, bottom))
+    else:
+        # The image already matches the target ratio, no cropping needed
+        cropped_image = image
+
+    return cropped_image
+
+
+
+def download_and_maybe_process_image(image_id, process=True, crop_ratio=None):
     try:
         # Fetch the document data from the API
         response = http.get(f"{api_url}/public_documents/{image_id}", auth=(username, password))
@@ -218,6 +239,8 @@ def download_and_maybe_process_image(image_id, process=True):
             # Construct the image URL
             image_url = f"https://cildata.crbs.ucsd.edu/media/thumbnail_display/{id_number}/{id_number}_thumbnailx512.jpg"
 
+
+
         if image_url is not None:
             # Fetch the image data
             response = requests.get(image_url, stream=True, timeout=5)
@@ -226,8 +249,14 @@ def download_and_maybe_process_image(image_id, process=True):
             # Load the image data with PIL
             image = Image.open(BytesIO(response.content))
 
-            # Crop the image
+            # Perform the initial cropping (to remove letterbox)
             image = crop_image(image)
+
+            # Optional: Crop to target aspect ratio
+            if crop_ratio:
+                print(f"Cropping to target aspect ratio: {crop_ratio}")
+                image = crop_to_aspect_ratio(image, crop_ratio)
+
 
 
             # Check if the processing is required
@@ -291,31 +320,49 @@ def download_and_maybe_process_image(image_id, process=True):
 
     return False
 
-def main():
-    parser = argparse.ArgumentParser(description="Download and process images from the CIL/CDBB API.")
-    parser.add_argument("--skip-processing", action="store_true", help="Skip the image processing step.")
-    parser.add_argument("--output-size", type=int, nargs=2, metavar=("width", "height"), help="Output image size (width and height).")
-    args = parser.parse_args()
+# alternatively, use a seed for pseudo-random ID shuffle
+# random.seed(666)
+# random.shuffle(ids)
 
-    output_size = (1200, 1200)  # Default output size
-    if args.output_size:
-        output_size = tuple(args.output_size)
+# Fetch the list of public IDs
+response = requests.get(f"{api_url}/public_ids?from=0&size=50000", auth=(username, password))
+response.raise_for_status()
 
-    while downloaded_images < num_images and index < len(ids):
-        # Call with process=True to process the image or process=False to just download
-        if download_and_maybe_process_image(ids[index], process=not args.skip_processing):
-            downloaded_images += 1
-            print(f"downloading {ids[index]} ({downloaded_images} of {min(num_images, len(ids))})")
-        index += 1
+# Get the list of IDs
+ids = [hit['_id'] for hit in response.json()['hits']['hits']]
 
-    print("done.")
-    # Record the end time
-    end_time = time.time()
+# Filter the IDs to only include those up to 50000 to avoid placeholder images
+ids = [id for id in ids if int(id[4:]) <= 50000]  # Assumes all IDs start with 'CIL_' which they seem to
 
-    # Calculate and print the total execution time
-    total_time_sec= end_time - start_time
-    total_time_min=total_time_sec/60
-    print(f"total runtime: {round(total_time_min, 2)} minutes")
+# Randomly shuffle the list of IDs
+# with new seed for random based on current time
+random.seed(time.time())
+random.shuffle(ids)
 
-if __name__ == "__main__":
-    main()
+# Initialize counter for downloaded images
+downloaded_images = 0
+
+# Initialize an index for the IDs list
+index = 0
+
+# define a final output aspect ratio
+# crop_ratio = 16/9 # widescreen
+# crop_ratio = 2.35/1 # cinemascope
+crop_ratio = 4/3 # u know
+
+
+while downloaded_images < num_images and index < len(ids):
+    # Call with process=True to process the image or process=False to just download
+    if download_and_maybe_process_image(ids[index], process=True, crop_ratio=crop_ratio):
+        downloaded_images += 1
+        print(f"downloading {ids[index]} ({downloaded_images} of {min(num_images, len(ids))})")
+    index += 1
+
+print("done.")
+# Record the end time
+end_time = time.time()
+
+# Calculate and print the total execution time
+total_time_sec= end_time - start_time
+total_time_min=total_time_sec/60
+print(f"total runtime: {round(total_time_min, 2)} minutes")
