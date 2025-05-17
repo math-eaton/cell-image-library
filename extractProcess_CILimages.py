@@ -21,10 +21,10 @@ except FileNotFoundError:
     processed_ids = set()
 
 # Define the number of images to download
-num_images = 15
+num_images = 4000
 
 # Define the output folder
-output_folder = "output/cinema"
+output_folder = "output/cinema_99"
 
 # Base URL for the API
 api_url = "https://cilia.crbs.ucsd.edu/rest"
@@ -126,7 +126,7 @@ def process_image(image):
     
     # Resize the image (pre-dither) while maintaining aspect ratio
     # Avoid forcing a fixed size here
-    image.thumbnail((1920, 1920), Image.BILINEAR)  # Ensure a max size while preserving aspect ratio
+    # image.thumbnail((960, 960), Image.NEAREST)  # Ensure a max size while preserving aspect ratio
     
     # Convert the image to grayscale
     image = image.convert('L')
@@ -150,10 +150,10 @@ def process_image(image):
 
     # Optionally crop the outer 2% (you can remove this if not needed)
     width, height = image.size
-    left = width * 0.02
-    top = height * 0.02
-    right = width * 0.98
-    bottom = height * 0.98
+    left = width * 0.1
+    top = height * 0.1
+    right = width * 0.9
+    bottom = height * 0.9
     image = image.crop((left, top, right, bottom))
 
     # Dynamically calculate the final output size while preserving aspect ratio
@@ -171,6 +171,8 @@ def process_image(image):
     print(f"Rescaling to {final_width}x{final_height}...")
 
     return image
+
+
 # Configure retries
 retry_strategy = Retry(
     total=5,
